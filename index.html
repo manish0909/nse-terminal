@@ -353,10 +353,10 @@ canvas#fchart{width:100%;display:block;border:1px solid var(--border);border-rad
 // ─────────────────────────────────────────────────────────────
 // CONFIG
 // ─────────────────────────────────────────────────────────────
-const PROXY = 'https://api.allorigins.win/get?url=';
-const PROXY2 = 'https://corsproxy.io/?';
 const YF = 'https://query1.finance.yahoo.com';
+const YF2 = 'https://query2.finance.yahoo.com';
 const NSE = 'https://www.nseindia.com/api';
+
 
 const QSTOCKS = [
   {l:'^NSEI',s:'^NSEI'},{l:'^NSEBANK',s:'^NSEBANK'},
@@ -398,15 +398,35 @@ const fCr = v => {
 };
 const now = () => new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
 
-async function pFetch(url) {
-  const r = await fetch(PROXY + encodeURIComponent(url));
-  const j = await r.json();
-  return JSON.parse(j.contents);
+async function proxyFetch(url) {
+  const PROXIES = [
+    u => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
+    u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+    u => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+    u => `https://thingproxy.freeboard.io/fetch/${u}`,
+  ];
+  const errors = [];
+  for (const makeUrl of PROXIES) {
+    try {
+      const r = await fetch(makeUrl(url), { signal: AbortSignal.timeout(8000) });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const text = await r.text();
+      try {
+        const j = JSON.parse(text);
+        if (j && j.contents !== undefined) return JSON.parse(j.contents);
+        return j;
+      } catch(_) { return JSON.parse(text); }
+    } catch(e) { errors.push(e.message); }
+  }
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  } catch(e) { errors.push(e.message); }
+  throw new Error('All proxies failed: ' + errors.slice(0,2).join(' | '));
 }
-async function pFetch2(url) {
-  const r = await fetch(PROXY2 + encodeURIComponent(url),{headers:{'x-requested-with':'XMLHttpRequest'}});
-  return r.json();
-}
+const pFetch = proxyFetch;
+const pFetch2 = proxyFetch;
 
 function setSt(m) {
   document.getElementById('stmsg').textContent = m;
@@ -523,8 +543,10 @@ function signals(prices, ind) {
 // DATA FETCH — YAHOO FINANCE
 // ─────────────────────────────────────────────────────────────
 async function yHist(sym, range='3mo') {
-  const url=`${YF}/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=${range}&includePrePost=false&events=div%2Csplit`;
-  const d=await pFetch(url);
+  const base = `v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=${range}&includePrePost=false&events=div%2Csplit`;
+  let d;
+  try { d = await proxyFetch(`https://query1.finance.yahoo.com/${base}`); }
+  catch(_) { d = await proxyFetch(`https://query2.finance.yahoo.com/${base}`); }
   const r=d.chart.result[0];
   const ts=r.timestamp;
   const q=r.indicators.quote[0];
@@ -544,8 +566,11 @@ async function yHist(sym, range='3mo') {
 }
 
 async function yQuotes(syms) {
-  const url=`${YF}/v7/finance/quote?symbols=${encodeURIComponent(syms.join(','))}&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketVolume,regularMarketDayHigh,regularMarketDayLow,fiftyTwoWeekHigh,fiftyTwoWeekLow,marketCap,trailingPE,shortName,longName,exchange,quoteType`;
-  const d=await pFetch(url);
+  const fields = 'regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketVolume,regularMarketDayHigh,regularMarketDayLow,fiftyTwoWeekHigh,fiftyTwoWeekLow,marketCap,trailingPE,shortName,longName,exchange,quoteType';
+  const base = `v7/finance/quote?symbols=${encodeURIComponent(syms.join(','))}&fields=${fields}`;
+  let d;
+  try { d = await proxyFetch(`https://query1.finance.yahoo.com/${base}`); }
+  catch(_) { d = await proxyFetch(`https://query2.finance.yahoo.com/${base}`); }
   return d.quoteResponse.result;
 }
 

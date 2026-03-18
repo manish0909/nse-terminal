@@ -568,10 +568,42 @@ async function yHist(sym, range='3mo') {
 async function yQuotes(syms) {
   const fields = 'regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketVolume,regularMarketDayHigh,regularMarketDayLow,fiftyTwoWeekHigh,fiftyTwoWeekLow,marketCap,trailingPE,shortName,longName,exchange,quoteType';
   const base = `v7/finance/quote?symbols=${encodeURIComponent(syms.join(','))}&fields=${fields}`;
-  let d;
-  try { d = await proxyFetch(`https://query1.finance.yahoo.com/${base}`); }
-  catch(_) { d = await proxyFetch(`https://query2.finance.yahoo.com/${base}`); }
-  return d.quoteResponse.result;
+  try {
+    let d;
+    try { d = await proxyFetch(`https://query1.finance.yahoo.com/${base}`); }
+    catch(_) { d = await proxyFetch(`https://query2.finance.yahoo.com/${base}`); }
+    const res = d.quoteResponse?.result;
+    if (res && res.length) return res;
+    throw new Error('empty');
+  } catch(_) {
+    // Fallback: build quote objects from chart endpoint
+    const results = await Promise.all(syms.map(async sym => {
+      const base2 = `v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=5d`;
+      let d2;
+      try { d2 = await proxyFetch(`https://query1.finance.yahoo.com/${base2}`); }
+      catch(__) { d2 = await proxyFetch(`https://query2.finance.yahoo.com/${base2}`); }
+      const r = d2.chart.result[0];
+      const meta = r.meta;
+      const closes = r.indicators.adjclose?.[0]?.adjclose || r.indicators.quote[0].close;
+      const vClose = closes.filter(v=>v!=null);
+      const price = meta.regularMarketPrice || vClose[vClose.length-1];
+      const prev = meta.chartPreviousClose || meta.previousClose || vClose[vClose.length-2] || price;
+      const chg = price - prev;
+      return {
+        symbol: sym, shortName: meta.shortName||sym,
+        regularMarketPrice: price,
+        regularMarketChange: chg,
+        regularMarketChangePercent: prev?(chg/prev)*100:0,
+        regularMarketVolume: meta.regularMarketVolume,
+        regularMarketDayHigh: meta.regularMarketDayHigh,
+        regularMarketDayLow: meta.regularMarketDayLow,
+        fiftyTwoWeekHigh: meta.fiftyTwoWeekHigh,
+        fiftyTwoWeekLow: meta.fiftyTwoWeekLow,
+        exchange: meta.exchangeName, quoteType: meta.instrumentType
+      };
+    }));
+    return results;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -916,22 +948,44 @@ function drawFIIChart(el, rows) {
 // ─────────────────────────────────────────────────────────────
 // MARKET STRIP
 // ─────────────────────────────────────────────────────────────
+async function fetchQuoteFromChart(sym) {
+  const base = `v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=5d&includePrePost=false`;
+  let d;
+  try { d = await proxyFetch(`https://query1.finance.yahoo.com/${base}`); }
+  catch(_) { d = await proxyFetch(`https://query2.finance.yahoo.com/${base}`); }
+  const r = d.chart.result[0];
+  const meta = r.meta;
+  const closes = r.indicators.adjclose?.[0]?.adjclose || r.indicators.quote[0].close;
+  const validCloses = closes.filter(v => v != null);
+  const price = meta.regularMarketPrice || validCloses[validCloses.length - 1];
+  const prev = meta.chartPreviousClose || meta.previousClose || validCloses[validCloses.length - 2] || price;
+  const change = price - prev;
+  const changePct = prev ? (change / prev) * 100 : 0;
+  return { symbol: sym, shortName: meta.shortName || sym, price, change, changePct };
+}
+
 async function loadStrip() {
-  try{
-    const qs=await yQuotes(INDICES.map(x=>x.s));
-    const el=document.getElementById('mstrip');
-    el.innerHTML='';
-    qs.forEach(q=>{
-      const up=q.regularMarketChange>=0;
-      el.innerHTML+=`<div class="mitem">
-        <span class="mitem-name">${q.shortName||q.symbol}</span>
-        <span class="mitem-price">${q.regularMarketPrice?.toFixed(2)||'—'}</span>
-        <span class="mitem-chg ${up?'up':'down'}">${up?'▲':'▼'} ${Math.abs(q.regularMarketChange||0).toFixed(2)} (${Math.abs(q.regularMarketChangePercent||0).toFixed(2)}%)</span>
+  const el = document.getElementById('mstrip');
+  const results = await Promise.allSettled(INDICES.map(x => fetchQuoteFromChart(x.s)));
+  let html = '';
+  let anyOk = false;
+  results.forEach((res, i) => {
+    if (res.status === 'fulfilled') {
+      anyOk = true;
+      const q = res.value;
+      const up = q.change >= 0;
+      const label = INDICES[i].l;
+      html += `<div class="mitem">
+        <span class="mitem-name">${label}</span>
+        <span class="mitem-price">${q.price?.toFixed(2) || '—'}</span>
+        <span class="mitem-chg ${up?'up':'down'}">${up?'▲':'▼'} ${Math.abs(q.change||0).toFixed(2)} (${Math.abs(q.changePct||0).toFixed(2)}%)</span>
       </div>`;
-    });
-  }catch(e){
-    document.getElementById('mstrip').innerHTML='<div class="mitem"><span class="mitem-name" style="color:var(--red)">Market strip unavailable</span></div>';
-  }
+    } else {
+      html += `<div class="mitem"><span class="mitem-name">${INDICES[i].l}</span><span class="mitem-price" style="color:var(--text2)">—</span></div>`;
+    }
+  });
+  el.innerHTML = html || '<div class="mitem"><span class="mitem-name" style="color:var(--red)">Market strip unavailable</span></div>';
+  if (anyOk) setTimeout(loadStrip, 60000);
 }
 
 // ─────────────────────────────────────────────────────────────

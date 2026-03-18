@@ -398,32 +398,48 @@ const fCr = v => {
 };
 const now = () => new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
 
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error('timeout after ' + ms + 'ms')), ms))
+  ]);
+}
+
+async function tryFetch(url) {
+  const r = await withTimeout(fetch(url, { mode: 'cors' }), 9000);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const text = await r.text();
+  if (!text || !text.trim()) throw new Error('empty response');
+  // allorigins wraps in {contents:...}
+  try {
+    const j = JSON.parse(text);
+    if (j && typeof j.contents === 'string') {
+      const inner = JSON.parse(j.contents);
+      return inner;
+    }
+    return j;
+  } catch(e) {
+    throw new Error('JSON parse failed: ' + text.slice(0, 60));
+  }
+}
+
 async function proxyFetch(url) {
-  const PROXIES = [
-    u => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
-    u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
-    u => `https://corsproxy.io/?${encodeURIComponent(u)}`,
-    u => `https://thingproxy.freeboard.io/fetch/${u}`,
+  const attempts = [
+    // 1. Direct (Yahoo Finance supports CORS on chart/quote endpoints)
+    () => tryFetch(url),
+    // 2. corsproxy.io — reliable, no wrapping
+    () => tryFetch(`https://corsproxy.io/?${encodeURIComponent(url)}`),
+    // 3. allorigins — wraps in {contents}
+    () => tryFetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`),
+    // 4. codetabs
+    () => tryFetch(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`),
   ];
   const errors = [];
-  for (const makeUrl of PROXIES) {
-    try {
-      const r = await fetch(makeUrl(url), { signal: AbortSignal.timeout(8000) });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      const text = await r.text();
-      try {
-        const j = JSON.parse(text);
-        if (j && j.contents !== undefined) return JSON.parse(j.contents);
-        return j;
-      } catch(_) { return JSON.parse(text); }
-    } catch(e) { errors.push(e.message); }
+  for (const attempt of attempts) {
+    try { return await attempt(); }
+    catch(e) { errors.push(e.message); }
   }
-  try {
-    const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    return r.json();
-  } catch(e) { errors.push(e.message); }
-  throw new Error('All proxies failed: ' + errors.slice(0,2).join(' | '));
+  throw new Error('All attempts failed: ' + errors.slice(0,2).join(' | '));
 }
 const pFetch = proxyFetch;
 const pFetch2 = proxyFetch;
